@@ -44,6 +44,17 @@ func TestParseDataINIEncodings(t *testing.T) {
 	}
 }
 
+func TestParseDataINISkipsSlashSlashComments(t *testing.T) {
+	ini := "[Data]\n  //5=custom.grf\n0=data.grf // kept\n1=\"patch;name.grf\" ; trailing\n"
+	names, err := parseDataINI([]byte(ini))
+	if err != nil {
+		t.Fatalf("parseDataINI error: %v", err)
+	}
+	if !slices.Equal(names, []string{"data.grf", "patch;name.grf"}) {
+		t.Fatalf("parseDataINI = %v; want [data.grf patch;name.grf]", names)
+	}
+}
+
 func TestManagerDataINIArchiveOrder(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"a-base.grf", "m-patch.gpf", "z-custom.grf", "data.grf", "event.grf"} {

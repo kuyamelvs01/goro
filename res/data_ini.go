@@ -82,7 +82,11 @@ func parseDataINI(data []byte) ([]string, error) {
 	for scanner.Scan() {
 		lineNo++
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		line = stripDataINIComment(line)
+		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
@@ -133,4 +137,25 @@ func parseDataINI(data []byte) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// stripDataINIComment removes an inline ; or // comment that is not inside quotes.
+func stripDataINIComment(line string) string {
+	inQuote := byte(0)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inQuote != 0:
+			if c == inQuote {
+				inQuote = 0
+			}
+		case c == '"' || c == '\'':
+			inQuote = c
+		case c == ';':
+			return strings.TrimSpace(line[:i])
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return line
 }
