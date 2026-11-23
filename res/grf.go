@@ -209,6 +209,25 @@ func parseGRFSignature(header []byte) string {
 	return string(sig)
 }
 
+func grfFileSize(file grfFile) int64 {
+	stater, ok := file.(interface{ Stat() (os.FileInfo, error) })
+	if !ok {
+		return -1
+	}
+	info, err := stater.Stat()
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+// grfVersion300LargeHeader reports whether a 0x300 header uses the int64
+// FileTableOffset layout introduced for >4GB archives. Matches GRFEditor:
+// bytes 35-37 (the top of the would-be seed dword) must be zero.
+func grfVersion300LargeHeader(header []byte) bool {
+	return header[35] == 0 && header[36] == 0 && header[37] == 0
+}
+
 func (g *GRF) load() error {
 	header := make([]byte, grfHeaderSize)
 	if _, err := io.ReadFull(g.file, header); err != nil {
@@ -230,25 +249,73 @@ func (g *GRF) load() error {
 		}
 		return g.loadTable(tableOffset, fileCountRaw-skip-7, false)
 	case grfVersion300:
-		tableOffset := binary.LittleEndian.Uint64(header[30:38]) + grfHeaderSize + 4
-		fileCount := binary.LittleEndian.Uint32(header[38:42])
-		return g.loadTable(tableOffset, fileCount, true)
+		return g.loadVersion300(header)
 	default:
 		return fmt.Errorf("%w: 0x%X", ErrGRFUnsupportedVersion, g.version)
 	}
 }
 
+func (g *GRF) loadVersion300(header []byte) error {
+	// 0x300 tables start with a 4-byte protected-key block length, then the
+	// compressed/uncompressed sizes used by loadTable.
+	const tablePrefix = 4
+	largeOffset := binary.LittleEndian.Uint64(header[30:38]) + grfHeaderSize + tablePrefix
+	largeCount := binary.LittleEndian.Uint32(header[38:42])
+
+	legacyOffset := uint64(binary.LittleEndian.Uint32(header[30:34])) + grfHeaderSize + tablePrefix
+	seed := binary.LittleEndian.Uint32(header[34:38])
+	fileCountRaw := binary.LittleEndian.Uint32(header[38:42])
+
+	useLarge := grfVersion300LargeHeader(header)
+	fileSize := grfFileSize(g.file)
+	// Byte 34 is shared by the low byte of a >4GB int64 offset and a small
+	// legacy seed. If the "large" offset is past EOF but the legacy offset
+	// fits, prefer the legacy 0x200-style layout (GRFEditor large-mode check
+	// alone cannot tell these apart).
+	if useLarge && fileSize >= 0 && int64(largeOffset) >= fileSize && int64(legacyOffset)+8 <= fileSize {
+		useLarge = false
+	}
+
+	if useLarge {
+		if err := g.loadTable(largeOffset, largeCount, true); err == nil {
+			return nil
+		} else if fileSize >= 0 && int64(largeOffset)+8 <= fileSize {
+			// Offset was valid; do not mask a real table/parse error by
+			// retrying legacy with a different file count.
+			return err
+		}
+		// Fall through to legacy when the large offset could not be read.
+		g.entries = make(map[string]GRFEntry)
+	}
+
+	if fileCountRaw < seed+7 {
+		return fmt.Errorf("invalid grf file count")
+	}
+	return g.loadTable(legacyOffset, fileCountRaw-seed-7, true)
+}
+
 func (g *GRF) loadTable(offset uint64, count uint32, wideOffset bool) error {
+	if offset > uint64(^uint64(0)>>1) {
+		return fmt.Errorf("grf file table offset %d overflows", offset)
+	}
+	fileSize := grfFileSize(g.file)
+	if fileSize >= 0 && int64(offset)+8 > fileSize {
+		return fmt.Errorf("grf file table offset %d past end of file (%d bytes): %w", offset, fileSize, io.EOF)
+	}
+
 	tableHeader := make([]byte, 8)
 	if _, err := g.file.ReadAt(tableHeader, int64(offset)); err != nil {
-		return err
+		return fmt.Errorf("read grf file table header at %d: %w", offset, err)
 	}
 	packedSize := binary.LittleEndian.Uint32(tableHeader[:4])
 	realSize := binary.LittleEndian.Uint32(tableHeader[4:8])
+	if fileSize >= 0 && int64(offset)+8+int64(packedSize) > fileSize {
+		return fmt.Errorf("grf packed table size %d at %d exceeds file size %d: %w", packedSize, offset, fileSize, io.EOF)
+	}
 
 	packed := make([]byte, packedSize)
 	if _, err := g.file.ReadAt(packed, int64(offset+8)); err != nil {
-		return err
+		return fmt.Errorf("read grf packed table at %d: %w", offset+8, err)
 	}
 
 	reader, err := zlib.NewReader(bytes.NewReader(packed))
