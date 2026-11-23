@@ -40,6 +40,44 @@ func TestGRFReadPlainCompressedEntry(t *testing.T) {
 	}
 }
 
+func TestParseGRFSignatureEventHorizon(t *testing.T) {
+	header := make([]byte, grfHeaderSize)
+	copy(header[:16], []byte("Event Horizon\x00RL"))
+	if got := parseGRFSignature(header); got != "Event Horizon" {
+		t.Fatalf("parseGRFSignature = %q, want %q", got, "Event Horizon")
+	}
+}
+
+func TestParseGRFSignatureMasterOfMagic(t *testing.T) {
+	header := make([]byte, grfHeaderSize)
+	copy(header[:16], []byte("Master of Magic\x00"))
+	if got := parseGRFSignature(header); got != "Master of Magic" {
+		t.Fatalf("parseGRFSignature = %q, want %q", got, "Master of Magic")
+	}
+}
+
+func TestGRFOpenEventHorizonSignature(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.grf")
+	if err := writeTestGRFWithSignature(path, "Event Horizon\x00RL", "data\\hello.txt", []byte("hello event")); err != nil {
+		t.Fatal(err)
+	}
+
+	grf, err := OpenGRF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grf.Close()
+
+	data, err := grf.ReadFile("data/hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello event" {
+		t.Fatalf("data = %q", string(data))
+	}
+}
+
 func TestNormalizeGRFNameDecodesEUCToUTF8(t *testing.T) {
 	input := "DATA/" + string([]byte{0xb8, 0xf3, 0xbd, 0xba, 0xc5, 0xcd}) + "/PORING.SPR"
 	got := normalizeGRFName(input)
@@ -163,6 +201,10 @@ func TestGRFRealArchiveWhenConfigured(t *testing.T) {
 }
 
 func writeTestGRF(path, name string, content []byte) error {
+	return writeTestGRFWithSignature(path, "Master of Magic", name, content)
+}
+
+func writeTestGRFWithSignature(path, signature, name string, content []byte) error {
 	compressedFile := zlibBytes(content)
 
 	var table bytes.Buffer
@@ -178,7 +220,7 @@ func writeTestGRF(path, name string, content []byte) error {
 
 	var out bytes.Buffer
 	header := make([]byte, grfHeaderSize)
-	copy(header[:15], []byte("Master of Magic"))
+	copy(header[:16], []byte(signature))
 	binary.LittleEndian.PutUint32(header[30:34], uint32(len(compressedFile)))
 	binary.LittleEndian.PutUint32(header[34:38], 0)
 	binary.LittleEndian.PutUint32(header[38:42], 8)

@@ -197,12 +197,24 @@ func shouldUseHeaderOnlyGRFDecrypt(name string) bool {
 	}
 }
 
+func parseGRFSignature(header []byte) string {
+	// Classic GRFs use a 15-byte "Master of Magic" field. Event Horizon GRFs
+	// store "Event Horizon\0RL" in the same 16-byte slot, so the 15-byte view
+	// is "Event Horizon\0R". Truncate at the first NUL rather than trimming
+	// only trailing NULs.
+	sig := header[:15]
+	if i := bytes.IndexByte(sig, 0); i >= 0 {
+		sig = sig[:i]
+	}
+	return string(sig)
+}
+
 func (g *GRF) load() error {
 	header := make([]byte, grfHeaderSize)
 	if _, err := io.ReadFull(g.file, header); err != nil {
 		return err
 	}
-	signature := strings.TrimRight(string(header[:15]), "\x00")
+	signature := parseGRFSignature(header)
 	if signature != "Master of Magic" && signature != "Event Horizon" {
 		return fmt.Errorf("invalid grf signature %q", signature)
 	}
