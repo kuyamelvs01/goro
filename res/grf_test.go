@@ -78,6 +78,42 @@ func TestGRFOpenEventHorizonSignature(t *testing.T) {
 	}
 }
 
+func TestGRFOpenEventHorizonVersion300Large(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.grf")
+	if err := writeTestGRFV300(path, false, 0, "data\\hello.txt", []byte("large eh")); err != nil {
+		t.Fatal(err)
+	}
+	assertGRFFileContents(t, path, "data/hello.txt", "large eh")
+}
+
+func TestGRFOpenEventHorizonVersion300LegacyWithSeed(t *testing.T) {
+	// Seed 1 sets header byte 34; the old always-int64 0x300 path sought
+	// past EOF (offset + 1<<32). Legacy layout must still open.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.grf")
+	if err := writeTestGRFV300(path, true, 1, "data\\hello.txt", []byte("legacy eh")); err != nil {
+		t.Fatal(err)
+	}
+	assertGRFFileContents(t, path, "data/hello.txt", "legacy eh")
+}
+
+func assertGRFFileContents(t *testing.T, path, name, want string) {
+	t.Helper()
+	grf, err := OpenGRF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grf.Close()
+	data, err := grf.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != want {
+		t.Fatalf("data = %q, want %q", data, want)
+	}
+}
+
 func TestNormalizeGRFNameDecodesEUCToUTF8(t *testing.T) {
 	input := "DATA/" + string([]byte{0xb8, 0xf3, 0xbd, 0xba, 0xc5, 0xcd}) + "/PORING.SPR"
 	got := normalizeGRFName(input)
@@ -234,6 +270,46 @@ func writeTestGRFWithSignature(path, signature, name string, content []byte) err
 	return os.WriteFile(path, out.Bytes(), 0o644)
 }
 
+// writeTestGRFV300 builds an Event Horizon archive. legacy=true writes the
+// 0x200-style uint32 offset + seed header fields; otherwise it writes the
+// int64 large-file header. seed is only used for the legacy layout.
+func writeTestGRFV300(path string, legacy bool, seed uint32, name string, content []byte) error {
+	compressedFile := zlibBytes(content)
+
+	var table bytes.Buffer
+	table.WriteString(name)
+	table.WriteByte(0)
+	writeU32(&table, uint32(len(compressedFile)))
+	writeU32(&table, uint32(len(compressedFile)))
+	writeU32(&table, uint32(len(content)))
+	table.WriteByte(0x01)
+	writeU64(&table, 0)
+
+	compressedTable := zlibBytes(table.Bytes())
+	fileTableOffset := uint32(len(compressedFile))
+
+	header := make([]byte, grfHeaderSize)
+	copy(header[:16], []byte("Event Horizon\x00RL"))
+	if legacy {
+		binary.LittleEndian.PutUint32(header[30:34], fileTableOffset)
+		binary.LittleEndian.PutUint32(header[34:38], seed)
+		binary.LittleEndian.PutUint32(header[38:42], 1+seed+7)
+	} else {
+		binary.LittleEndian.PutUint64(header[30:38], uint64(fileTableOffset))
+		binary.LittleEndian.PutUint32(header[38:42], 1)
+	}
+	binary.LittleEndian.PutUint32(header[42:46], grfVersion300)
+
+	var out bytes.Buffer
+	out.Write(header)
+	out.Write(compressedFile)
+	writeU32(&out, 0) // protected key block length
+	writeU32(&out, uint32(len(compressedTable)))
+	writeU32(&out, uint32(len(table.Bytes())))
+	out.Write(compressedTable)
+	return os.WriteFile(path, out.Bytes(), 0o644)
+}
+
 func zlibBytes(data []byte) []byte {
 	var out bytes.Buffer
 	writer := zlib.NewWriter(&out)
@@ -245,5 +321,11 @@ func zlibBytes(data []byte) []byte {
 func writeU32(buf *bytes.Buffer, value uint32) {
 	var tmp [4]byte
 	binary.LittleEndian.PutUint32(tmp[:], value)
+	buf.Write(tmp[:])
+}
+
+func writeU64(buf *bytes.Buffer, value uint64) {
+	var tmp [8]byte
+	binary.LittleEndian.PutUint64(tmp[:], value)
 	buf.Write(tmp[:])
 }
